@@ -80,18 +80,24 @@ class OptionsDialog(QDialog):
         self.prn_edit.setPlaceholderText("Printer name, e.g. \\host\\queue")
         self.prn_edit.setText(S.value("printer_name", DEFAULT_PRINTER))
 
+        self.server_edit = QLineEdit(self)
+        self.server_edit.setPlaceholderText("Server URL")
+        self.server_edit.setText(S.value("server_url", SERVER_URL))
+
         save_btn = QPushButton("Save", self)
         save_btn.clicked.connect(self._save)
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.api_edit)
         lay.addWidget(self.prn_edit)
+        lay.addWidget(self.server_edit)
         lay.addWidget(save_btn)
 
     # ------------------------------------------------------------------
     def _save(self):
         api_key = self.api_edit.text().strip()
         prn     = self.prn_edit.text().strip()
+        svr = self.server_edit.text().strip()
 
         if not api_key or not prn:
             QMessageBox.warning(self, "Options", "Both fields are required")
@@ -99,6 +105,7 @@ class OptionsDialog(QDialog):
 
         S.setValue("api_key", api_key)
         S.setValue("printer_name", prn)
+        S.setValue("server_url", svr)          # <── consistent key
         self.accept()
 
 # -----------------------------------------------------------------------------
@@ -130,6 +137,9 @@ class MainWindow(QMainWindow):
         # -- data --------------------------------------------------------------
         self._load_prefs()
 
+        # -- timers ------------------------------------------------------------
+        self.retry_timer = QTimer(self, interval=10_000, timeout=self._connect_socket)
+
         # -- socket ------------------------------------------------------------
         self.sio = socketio.Client(  # auto reconnect off (we handle it)
             reconnection=False,
@@ -139,8 +149,6 @@ class MainWindow(QMainWindow):
         self._register_handlers()
         self._connect_socket()
 
-        # -- timers ------------------------------------------------------------
-        self.retry_timer = QTimer(self, interval=10_000, timeout=self._connect_socket)
 
         # -- signals connect ---------------------------------------------------
         self.log_sig.connect(self._log)
@@ -174,6 +182,8 @@ class MainWindow(QMainWindow):
     def _load_prefs(self):
         self.api_key      = S.value("api_key", "")
         self.printer_name = S.value("printer_name", DEFAULT_PRINTER)
+        self.server_url   = S.value("server_url", SERVER_URL)   # <── new
+
         if not self.api_key:
             self.status_sig.emit("No API key")
 
@@ -203,15 +213,25 @@ class MainWindow(QMainWindow):
 
     # .........................................................................
     def _connect_socket(self):
-        if not self.api_key or self.sio.connected:
+        # nothing to do?
+        if not self.api_key or not self.server_url:
             return
+
+        # Already connected to the right place
+        if self.sio.connected and self.current_url == self.server_url:
+            return
+
+        # If connected to a *different* URL, drop first
+        if self.sio.connected:
+            self.sio.disconnect()
+
         try:
-            self.sio.connect(SERVER_URL, auth={"api_key": self.api_key})
+            self.current_url = self.server_url         # remember where we dial
+            self.sio.connect(self.server_url, auth={"api_key": self.api_key})
         except Exception as exc:  # pylint: disable=broad-except
             self.log_sig.emit(f"Connection error: {exc}")
             self.status_sig.emit("Disconnected")
             self.retry_timer.start()
-
     # .........................................................................
     def _handle_print_job(self, data: dict):
         job_id = data.get("job_id")
