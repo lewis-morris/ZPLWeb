@@ -4,7 +4,7 @@ import sys
 import datetime as dt
 from threading import Thread
 
-from PySide6.QtCore import QSettings, QTimer, Signal, Slot
+from PySide6.QtCore import QEventLoop, QSettings, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -48,6 +48,14 @@ S = QSettings(*SETTINGS_SCOPE)
 # -----------------------------------------------------------------------------
 # Printing util (thread‑safe)
 # -----------------------------------------------------------------------------
+
+import logging, queue
+
+def wait_ms(ms: int):
+    loop = QEventLoop()
+    QTimer.singleShot(ms, loop.quit)
+    loop.exec()    # blocks here, but UI remains responsive
+
 
 
 def _print_zpl(
@@ -168,9 +176,6 @@ class MainWindow(QMainWindow):
         # -- data --------------------------------------------------------------
         self._load_prefs()
 
-        # -- timers ------------------------------------------------------------
-        self.retry_timer = QTimer(self, interval=10_000, timeout=self._connect_socket)
-
         # -- socket ------------------------------------------------------------
         self.sio = socketio.Client(  # auto reconnect off (we handle it)
             reconnection=False,
@@ -178,32 +183,28 @@ class MainWindow(QMainWindow):
             engineio_logger=True,   # <── add
         )
         self._register_handlers()
-        self._connect_socket()
+        QTimer.singleShot(0, self._connect_socket)
 
         # -- signals connect ---------------------------------------------------
-        self.log_sig.connect(self._log)
-        self.status_sig.connect(self.stat.setText)
-        self.ack_sig.connect(self._emit_ack)
-        self._reconnect.connect(self._connect_socket)
-        self.gui_connected.connect(self._on_gui_connected)
-        self.gui_disconnected.connect(self._on_gui_disconnected)
+        self.log_sig.connect(self._log, Qt.QueuedConnection)
+        self.status_sig.connect(self.stat.setText, Qt.QueuedConnection)
+        self.gui_connected.connect(self._on_gui_connected, Qt.QueuedConnection)
+        self.gui_disconnected.connect(self._on_gui_disconnected, Qt.QueuedConnection)
+        self.ack_sig.connect(self._emit_ack, Qt.QueuedConnection)
 
     @Slot()
     def _on_gui_connected(self):
-        self.retry_timer.stop()
         self.re_btn.setEnabled(False)
         self.status_sig.emit("Connected")
 
     @Slot()
     def _on_gui_disconnected(self):
-        self.retry_timer.start()
         self.re_btn.setEnabled(True)
         self.status_sig.emit("Disconnected")
 
     # ─── still inside MainWindow class (anywhere convenient) ─────────────────────
     def _manual_reconnect(self) -> None:
         """User‑initiated reconnect via the reload button."""
-        self.retry_timer.stop()     # don’t let the auto‑timer collide
         self._connect_socket()
 
     # ===================================================================== MENU
@@ -246,51 +247,55 @@ class MainWindow(QMainWindow):
 
         @self.sio.event
         def connect():
+            print("SocketIO: connected, emitting api_key explicitly")
+            self.sio.emit('auth', {'api_key': self.api_key})  # ensure your server expects this event
             self.log_sig.emit("Connected")
             self.gui_connected.emit()
 
         @self.sio.event
         def disconnect():
+            print("SocketIO: disconnect event fired")
             self.log_sig.emit("Disconnected")
             self.gui_disconnected.emit()
 
         @self.sio.event
-        def connect_error(err):  # noqa: N802
+        def connect_error(err):
+            print(f"SocketIO: connect_error fired: {err}")
             self.log_sig.emit(f"Connect failed: {err}")
-            if not self.sio.connected:             # only if really offline
+            if not self.sio.connected:
                 self.status_sig.emit("Disconnected")
-                self.retry_timer.start()
                 self.re_btn.setEnabled(True)
+
+        @self.sio.on("status")
+        def on_status(data):
+            print(f"SocketIO: status event fired with data: {data}")
+            self.log_sig.emit(f"Server status: {data.get('msg')}")
 
         @self.sio.on("print_label")
         def on_print_label(data):
-            Thread(target=self._handle_print_job,
-                   args=(data,),
-                   daemon=True).start()
+            print(f"SocketIO: print_label event fired with data: {data}")
+            Thread(target=self._handle_print_job, args=(data,), daemon=True).start()
     # .........................................................................
     def _connect_socket(self) -> None:
-        """(Re)connect the socket.io client using stored preferences."""
+        """Connect/reconnect to socket.io with logging."""
         if not self.api_key or not self.server_url:
-            return
-
-        if self.sio.connected and self.current_url == self.server_url:
+            self.status_sig.emit("Missing API key or URL")
             return
 
         if self.sio.connected:
             self.sio.disconnect()
 
         try:
-            self.current_url = self.server_url
             self.sio.connect(
                 self.server_url,
+                transports=["websocket"],
                 auth={"api_key": self.api_key},
-                transports=["websocket"],      # <— skip long‑polling probe
             )
-        except Exception as exc:  # pylint: disable=broad-except
+            print("Attempting socket.io connection...")
+        except Exception as exc:
             self.log_sig.emit(f"Connection error: {exc}")
             self.status_sig.emit("Disconnected")
             self.retry_timer.start()
-
 
     # .........................................................................
     def _handle_print_job(self, data: dict) -> None:
