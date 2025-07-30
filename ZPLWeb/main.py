@@ -4,7 +4,7 @@ import sys
 import datetime as dt
 from threading import Thread
 
-from PySide6.QtCore import QSettings, QTimer, Signal
+from PySide6.QtCore import QSettings, QTimer, Signal, Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QLabel,
     QDialog,
+    QToolButton,
     QVBoxLayout,
     QLineEdit,
     QPushButton,
@@ -136,7 +137,8 @@ class MainWindow(QMainWindow):
     status_sig = Signal(str)
     ack_sig = Signal(int)  # job_id to ack
     _reconnect = Signal()
-
+    gui_connected   = Signal()
+    gui_disconnected = Signal()
     # .........................................................................
     def __init__(self) -> None:
         """Initialize the main window and connect to the socket server."""
@@ -152,6 +154,14 @@ class MainWindow(QMainWindow):
         self.stat.setStyleSheet("font-weight:bold; margin:5px;")
         self.statusBar().addPermanentWidget(self.stat)
 
+        # manual reconnect button
+        self.re_btn = QToolButton(self)
+        self.re_btn.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.re_btn.setToolTip("Reconnect to server now")
+        self.re_btn.clicked.connect(self._manual_reconnect)
+        self.statusBar().addPermanentWidget(self.re_btn)
+        self.re_btn.setEnabled(True)        # enabled while we are disconnected
+
         self._build_menu()
         self._build_tray()
 
@@ -164,8 +174,8 @@ class MainWindow(QMainWindow):
         # -- socket ------------------------------------------------------------
         self.sio = socketio.Client(  # auto reconnect off (we handle it)
             reconnection=False,
-            logger=False,
-            engineio_logger=False,
+            logger=True,            # <── add
+            engineio_logger=True,   # <── add
         )
         self._register_handlers()
         self._connect_socket()
@@ -175,6 +185,26 @@ class MainWindow(QMainWindow):
         self.status_sig.connect(self.stat.setText)
         self.ack_sig.connect(self._emit_ack)
         self._reconnect.connect(self._connect_socket)
+        self.gui_connected.connect(self._on_gui_connected)
+        self.gui_disconnected.connect(self._on_gui_disconnected)
+
+    @Slot()
+    def _on_gui_connected(self):
+        self.retry_timer.stop()
+        self.re_btn.setEnabled(False)
+        self.status_sig.emit("Connected")
+
+    @Slot()
+    def _on_gui_disconnected(self):
+        self.retry_timer.start()
+        self.re_btn.setEnabled(True)
+        self.status_sig.emit("Disconnected")
+
+    # ─── still inside MainWindow class (anywhere convenient) ─────────────────────
+    def _manual_reconnect(self) -> None:
+        """User‑initiated reconnect via the reload button."""
+        self.retry_timer.stop()     # don’t let the auto‑timer collide
+        self._connect_socket()
 
     # ===================================================================== MENU
     def _build_menu(self) -> None:
@@ -203,9 +233,9 @@ class MainWindow(QMainWindow):
     # ================================================================== PREFS
     def _load_prefs(self) -> None:
         """Load persisted preferences."""
-        self.api_key = S.value("api_key", "")
+        self.api_key      = S.value("api_key", "").strip()
         self.printer_name = S.value("printer_name", DEFAULT_PRINTER)
-        self.server_url = S.value("server_url", SERVER_URL)  # <── new
+        self.server_url   = S.value("server_url", SERVER_URL).strip()
 
         if not self.api_key:
             self.status_sig.emit("No API key")
@@ -217,47 +247,50 @@ class MainWindow(QMainWindow):
         @self.sio.event
         def connect():
             self.log_sig.emit("Connected")
-            self.status_sig.emit("Connected")
-            self.retry_timer.stop()
+            self.gui_connected.emit()
 
         @self.sio.event
         def disconnect():
             self.log_sig.emit("Disconnected")
-            self.status_sig.emit("Disconnected")
-            self.retry_timer.start()
+            self.gui_disconnected.emit()
 
         @self.sio.event
         def connect_error(err):  # noqa: N802
             self.log_sig.emit(f"Connect failed: {err}")
-            self.status_sig.emit("Disconnected")
-            self.retry_timer.start()
+            if not self.sio.connected:             # only if really offline
+                self.status_sig.emit("Disconnected")
+                self.retry_timer.start()
+                self.re_btn.setEnabled(True)
 
         @self.sio.on("print_label")
         def on_print_label(data):
-            Thread(target=self._handle_print_job, args=(data,), daemon=True).start()
-
+            Thread(target=self._handle_print_job,
+                   args=(data,),
+                   daemon=True).start()
     # .........................................................................
     def _connect_socket(self) -> None:
         """(Re)connect the socket.io client using stored preferences."""
-        # nothing to do?
         if not self.api_key or not self.server_url:
             return
 
-        # Already connected to the right place
         if self.sio.connected and self.current_url == self.server_url:
             return
 
-        # If connected to a *different* URL, drop first
         if self.sio.connected:
             self.sio.disconnect()
 
         try:
-            self.current_url = self.server_url  # remember where we dial
-            self.sio.connect(self.server_url, auth={"api_key": self.api_key})
+            self.current_url = self.server_url
+            self.sio.connect(
+                self.server_url,
+                auth={"api_key": self.api_key},
+                transports=["websocket"],      # <— skip long‑polling probe
+            )
         except Exception as exc:  # pylint: disable=broad-except
             self.log_sig.emit(f"Connection error: {exc}")
             self.status_sig.emit("Disconnected")
             self.retry_timer.start()
+
 
     # .........................................................................
     def _handle_print_job(self, data: dict) -> None:
