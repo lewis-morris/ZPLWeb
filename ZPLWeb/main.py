@@ -5,7 +5,7 @@ from threading import Thread
 from functools import partial
 
 from PySide6.QtCore import Qt, QSettings, QTimer, Signal, QObject
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 import socketio
+
+from ZPLWeb.utils import resource_path
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Platform‑specific printer import
@@ -267,6 +269,12 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    icon_file = resource_path("assets/icon.ico")
+    icon = QIcon(icon_file)
+
+    app.setWindowIcon(icon)
+
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
