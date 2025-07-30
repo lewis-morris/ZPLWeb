@@ -1,0 +1,30 @@
+[project]
+name = "ZPLWeb"
+version = "0.1.0"
+description = "ZPL printing desktop client"
+authors = [{name="ACME"}]
+license = {text="MIT"}
+readme = "README.md"
+requires-python = ">=3.12"
+
+[project.urls]
+Homepage = ""
+
+[project.scripts]
+zplweb = "ZPLWeb.main:main"
+
+[tool.black]
+target-version = ['py312']
+line-length = 88
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"]
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
