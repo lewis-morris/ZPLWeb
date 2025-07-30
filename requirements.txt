@@ -1,0 +1,5 @@
+python-socketio~=5.13.0
+PySide6~=6.9.1
+websocket-client
+requests
+pyinstaller
