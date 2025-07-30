@@ -1,11 +1,11 @@
+"""GUI application for printing ZPL labels received via socket.io."""
+
 import sys
-import json
 import datetime as dt
 from threading import Thread
-from functools import partial
 
-from PySide6.QtCore import Qt, QSettings, QTimer, Signal, QObject
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QSettings, QTimer, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 import socketio
 
 from ZPLWeb.utils import resource_path
+from typing import Callable, Any
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Platform‑specific printer import
@@ -47,14 +48,26 @@ S = QSettings(*SETTINGS_SCOPE)
 # Printing util (thread‑safe)
 # -----------------------------------------------------------------------------
 
-def _print_zpl(printer_name: str, zpl_string: str, cb):
-    """Run in background thread; calls back with (success, message)."""
+
+def _print_zpl(
+    printer_name: str, zpl_string: str, cb: Callable[[bool, str], Any]
+) -> None:
+    """Send ZPL to the given printer.
+
+    The function executes in a background thread and notifies the caller
+    through ``cb`` when finished.
+
+    Args:
+        printer_name: Target printer queue name.
+        zpl_string: Raw ZPL command string.
+        cb: Callback receiving ``(success, message)``.
+    """
     if not win32print:
         return cb(False, "win32print not available on this OS")
 
     try:
         handle = win32print.OpenPrinter(printer_name)
-        job_id = win32print.StartDocPrinter(handle, 1, ("ZPL", None, "RAW"))
+        win32print.StartDocPrinter(handle, 1, ("ZPL", None, "RAW"))
         win32print.StartPagePrinter(handle)
         win32print.WritePrinter(handle, zpl_string.encode("utf-8"))
         win32print.EndPagePrinter(handle)
@@ -64,13 +77,15 @@ def _print_zpl(printer_name: str, zpl_string: str, cb):
     except Exception as exc:  # pylint: disable=broad-except
         cb(False, f"Print error: {exc}")
 
+
 # -----------------------------------------------------------------------------
 # Options dialog
 # -----------------------------------------------------------------------------
 class OptionsDialog(QDialog):
-    """Simple dialog to edit API key & printer name."""
+    """Dialog for editing API key, printer and server settings."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QDialog | None = None) -> None:
+        """Set up the dialog widgets with existing preferences."""
         super().__init__(parent)
         self.setWindowTitle("Options")
 
@@ -96,9 +111,11 @@ class OptionsDialog(QDialog):
         lay.addWidget(save_btn)
 
     # ------------------------------------------------------------------
-    def _save(self):
+    def _save(self) -> None:
+        """Persist the entered values back to :class:`QSettings`."""
+
         api_key = self.api_edit.text().strip()
-        prn     = self.prn_edit.text().strip()
+        prn = self.prn_edit.text().strip()
         svr = self.server_edit.text().strip()
 
         if not api_key or not prn:
@@ -107,20 +124,22 @@ class OptionsDialog(QDialog):
 
         S.setValue("api_key", api_key)
         S.setValue("printer_name", prn)
-        S.setValue("server_url", svr)          # <── consistent key
+        S.setValue("server_url", svr)  # <── consistent key
         self.accept()
+
 
 # -----------------------------------------------------------------------------
 # Main Qt window
 # -----------------------------------------------------------------------------
 class MainWindow(QMainWindow):
-    log_sig     = Signal(str)
-    status_sig  = Signal(str)
-    ack_sig     = Signal(int)            # job_id to ack
-    _reconnect  = Signal()
+    log_sig = Signal(str)
+    status_sig = Signal(str)
+    ack_sig = Signal(int)  # job_id to ack
+    _reconnect = Signal()
 
     # .........................................................................
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize the main window and connect to the socket server."""
         super().__init__()
         self.setWindowTitle("Coleman Print Agent")
         self.resize(650, 450)
@@ -151,7 +170,6 @@ class MainWindow(QMainWindow):
         self._register_handlers()
         self._connect_socket()
 
-
         # -- signals connect ---------------------------------------------------
         self.log_sig.connect(self._log)
         self.status_sig.connect(self.stat.setText)
@@ -159,7 +177,8 @@ class MainWindow(QMainWindow):
         self._reconnect.connect(self._connect_socket)
 
     # ===================================================================== MENU
-    def _build_menu(self):
+    def _build_menu(self) -> None:
+        """Create the menubar actions."""
         mb = self.menuBar()
         file_m = mb.addMenu("File")
         file_m.addAction("Exit", self.close)
@@ -167,7 +186,8 @@ class MainWindow(QMainWindow):
         edit_m.addAction("Options", self._open_options)
 
     # ==================================================================== TRAY
-    def _build_tray(self):
+    def _build_tray(self) -> None:
+        """Create a system tray icon if supported."""
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray = QSystemTrayIcon(self)
@@ -181,16 +201,19 @@ class MainWindow(QMainWindow):
         self.tray = tray
 
     # ================================================================== PREFS
-    def _load_prefs(self):
-        self.api_key      = S.value("api_key", "")
+    def _load_prefs(self) -> None:
+        """Load persisted preferences."""
+        self.api_key = S.value("api_key", "")
         self.printer_name = S.value("printer_name", DEFAULT_PRINTER)
-        self.server_url   = S.value("server_url", SERVER_URL)   # <── new
+        self.server_url = S.value("server_url", SERVER_URL)  # <── new
 
         if not self.api_key:
             self.status_sig.emit("No API key")
 
     # ============================================================ SOCKET HANDL.
-    def _register_handlers(self):
+    def _register_handlers(self) -> None:
+        """Register socket.io event handlers."""
+
         @self.sio.event
         def connect():
             self.log_sig.emit("Connected")
@@ -214,7 +237,8 @@ class MainWindow(QMainWindow):
             Thread(target=self._handle_print_job, args=(data,), daemon=True).start()
 
     # .........................................................................
-    def _connect_socket(self):
+    def _connect_socket(self) -> None:
+        """(Re)connect the socket.io client using stored preferences."""
         # nothing to do?
         if not self.api_key or not self.server_url:
             return
@@ -228,43 +252,54 @@ class MainWindow(QMainWindow):
             self.sio.disconnect()
 
         try:
-            self.current_url = self.server_url         # remember where we dial
+            self.current_url = self.server_url  # remember where we dial
             self.sio.connect(self.server_url, auth={"api_key": self.api_key})
         except Exception as exc:  # pylint: disable=broad-except
             self.log_sig.emit(f"Connection error: {exc}")
             self.status_sig.emit("Disconnected")
             self.retry_timer.start()
+
     # .........................................................................
-    def _handle_print_job(self, data: dict):
+    def _handle_print_job(self, data: dict) -> None:
+        """Handle an incoming print job request."""
         job_id = data.get("job_id")
-        inv    = data.get("invoice")
-        pcs    = data.get("pcs")
-        zpl    = data.get("data")
+        inv = data.get("invoice")
+        pcs = data.get("pcs")
+        zpl = data.get("data")
 
         self.log_sig.emit(f"Printing {inv} x {pcs or '?'} pcs…")
 
-        cb = lambda ok, msg: self.log_sig.emit(msg) or (self.ack_sig.emit(job_id) if ok and job_id else None)
+        def cb(ok: bool, msg: str) -> None:
+            self.log_sig.emit(msg)
+            if ok and job_id:
+                self.ack_sig.emit(job_id)
+
         _print_zpl(self.printer_name, zpl, cb)
 
     # .........................................................................
-    def _emit_ack(self, job_id: int):
+    def _emit_ack(self, job_id: int) -> None:
+        """Acknowledge a completed print job back to the server."""
         if self.sio.connected and job_id:
             self.sio.emit("print_label_ack", {"job_id": job_id, "status": "printed"})
 
     # ================================================================ GUI UTILS
-    def _open_options(self):
+    def _open_options(self) -> None:
+        """Open the options dialog and reload preferences on accept."""
         dlg = OptionsDialog(self)
         if dlg.exec():
             self._load_prefs()
             self._reconnect.emit()
 
-    def _log(self, text):
+    def _log(self, text: str) -> None:
+        """Append a timestamped line to the output widget."""
         ts = dt.datetime.now().strftime("%H:%M:%S")
         self.out.append(f"[{ts}] {text}")
+
 
 # -----------------------------------------------------------------------------
 # main
 # -----------------------------------------------------------------------------
+
 
 def main():
     app = QApplication(sys.argv)
@@ -278,6 +313,7 @@ def main():
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()

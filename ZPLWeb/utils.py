@@ -1,14 +1,15 @@
 import sys
 import os
 
+
 def resource_path(relative_path: str) -> str:
-    """
-    Get absolute path to resource, works for dev and for PyInstaller.
+    """Return absolute path to a bundled resource.
 
     Args:
-        relative_path (str): Relative path to the resource.
+        relative_path: Path relative to the project root or frozen bundle.
+
     Returns:
-        str: Absolute path to the resource.
+        Absolute path to the resolved resource.
     """
     if getattr(sys, "frozen", False):
         # PyInstaller places extracted files in _MEIPASS
