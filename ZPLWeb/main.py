@@ -38,7 +38,7 @@ else:
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants & defaults
 # ──────────────────────────────────────────────────────────────────────────────
-SERVER_URL = "http://192.168.0.7:5006"
+SERVER_URL = "https://colemanbros.co.uk"
 DEFAULT_PRINTER = r"\\office-02\\ZPL500"
 SETTINGS_SCOPE = ("ColemanAgent", "PrintAgent")
 
@@ -342,7 +342,6 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.log_sig.emit(f"Connection error: {exc}")
             self.status_sig.emit("Disconnected")
-            self.retry_timer.start()
 
     # .........................................................................
     def _handle_print_job(self, data: dict) -> None:
