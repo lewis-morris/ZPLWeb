@@ -136,6 +136,43 @@ class OptionsDialog(QDialog):
         S.setValue("server_url", svr)  # <── consistent key
         self.accept()
 
+class TestPrintDialog(QDialog):
+    """Light-weight dialog to paste ZPL and send a one-off test print."""
+
+    def __init__(self, parent: QDialog | None = None, printer_name: str | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Test ZPL Print")
+        self.printer_name = printer_name
+
+        self.text_edit = QTextEdit(self)
+        self.text_edit.setAcceptRichText(False)
+        self.text_edit.setPlaceholderText("Paste or type raw ZPL here…")
+
+        self.status_lbl = QLabel(self)
+
+        send_btn = QPushButton("Print", self)
+        send_btn.clicked.connect(self._do_print)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.text_edit)
+        lay.addWidget(send_btn)
+        lay.addWidget(self.status_lbl)
+
+    # ------------------------------------------------------------------
+    def _do_print(self) -> None:
+        zpl = self.text_edit.toPlainText().strip()
+        if not zpl:
+            QMessageBox.warning(self, "Test ZPL Print", "Please enter some ZPL.")
+            return
+
+        def cb(ok: bool, msg: str) -> None:
+            # hop back to GUI thread
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(msg))
+            QMessageBox.information(self if ok else self.parent(),  # coloured icon
+                                    "Test ZPL Print", msg)
+
+        # run the actual I/O in a worker thread
+        Thread(target=_print_zpl, args=(self.printer_name, zpl, cb), daemon=True).start()
 
 # -----------------------------------------------------------------------------
 # Main Qt window
@@ -192,6 +229,11 @@ class MainWindow(QMainWindow):
         self.gui_disconnected.connect(self._on_gui_disconnected, Qt.QueuedConnection)
         self.ack_sig.connect(self._emit_ack, Qt.QueuedConnection)
 
+    # ------------------------------------------------------------------
+    def _open_test_print(self) -> None:
+        """Menu handler: open the raw-ZPL test-print dialog."""
+        TestPrintDialog(self, self.printer_name).exec()
+
     @Slot()
     def _on_gui_connected(self):
         self.re_btn.setEnabled(False)
@@ -209,12 +251,17 @@ class MainWindow(QMainWindow):
 
     # ===================================================================== MENU
     def _build_menu(self) -> None:
-        """Create the menubar actions."""
         mb = self.menuBar()
+
         file_m = mb.addMenu("File")
         file_m.addAction("Exit", self.close)
+
         edit_m = mb.addMenu("Edit")
         edit_m.addAction("Options", self._open_options)
+
+        # NEW —–––––––––––––––––––––––––––––––––––––
+        tools_m = mb.addMenu("Tools")
+        tools_m.addAction("Test ZPL Print", self._open_test_print)
 
     # ==================================================================== TRAY
     def _build_tray(self) -> None:
