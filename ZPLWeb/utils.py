@@ -1,6 +1,14 @@
 import sys
 import os
 
+import hashlib
+
+def _make_fingerprint(invoice, pcs, zpl) -> str:
+    h = hashlib.sha256()
+    h.update((invoice or "").encode("utf-8"))
+    h.update(str(pcs or "").encode("utf-8"))
+    h.update((zpl or "").encode("utf-8"))
+    return h.hexdigest()
 
 def resource_path(relative_path: str) -> str:
     """Return absolute path to a bundled resource.
