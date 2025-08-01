@@ -298,10 +298,10 @@ class MainWindow(QMainWindow):
         """Populate the left-hand list from the existing DB rows."""
         self.list.clear()                         # start with a clean slate
         with sqlite3.connect(self._db_path) as con:
-            for invoice, copies, ts in con.execute(
-                "SELECT invoice, copies, tstamp FROM prints ORDER BY id DESC"
+            for invoice, pcs, ts in con.execute(
+                "SELECT invoice, pcs, tstamp FROM prints ORDER BY id DESC"
             ):
-                self._add_print_to_list(invoice, copies, ts)
+                self._add_print_to_list(invoice, pcs, ts)
 
     def _add_print_to_list(self, invoice: str, pcs: int, ts: str) -> None:
         self.list.insertItem(0, f"{invoice}  x{pcs or 1}")
@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
                        id       INTEGER PRIMARY KEY AUTOINCREMENT,
                        job_id   INTEGER,
                        invoice  TEXT,
-                       copies   INTEGER,
+                       pcs   INTEGER,
                        zpl      TEXT,
                        tstamp   TEXT
                    )"""
@@ -518,7 +518,7 @@ class MainWindow(QMainWindow):
         tstamp = dt.datetime.now().isoformat(timespec="seconds")
         with sqlite3.connect(self._db_path) as con:
             con.execute(
-                "INSERT INTO prints (job_id, invoice, copies, zpl, tstamp) VALUES (?,?,?,?,?)",
+                "INSERT INTO prints (job_id, invoice, pcs, zpl, tstamp) VALUES (?,?,?,?,?)",
                 (job_id, invoice, pcs, zpl, tstamp),
             )
         # safely update GUI from any thread:
