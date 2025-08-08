@@ -1,37 +1,37 @@
 """GUI application for printing ZPL labels received via socket.io."""
+
+import datetime as dt
 import sqlite3
 import sys
-import datetime as dt
 from pathlib import Path
 from threading import Thread
-
-from PySide6.QtCore import QEventLoop, QSettings, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (
-    QApplication,
-    QListWidget,
-    QMainWindow,
-    QSizePolicy,
-    QSplitter,
-    QStyle,
-    QTextEdit,
-    QLabel,
-    QDialog,
-    QToolButton,
-    QVBoxLayout,
-    QLineEdit,
-    QPushButton,
-    QMessageBox,
-    QSystemTrayIcon,
-    QMenu,
-    QWidget,
-)
+from typing import Any, Callable
 
 import socketio
 from appdirs import user_data_dir
+from PySide6.QtCore import QEventLoop, QSettings, Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QSplitter,
+    QStyle,
+    QSystemTrayIcon,
+    QTextEdit,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
-from ZPLWeb.utils import resource_path
-from typing import Callable, Any
+from ZPLWeb.utils import expire_stale_jobs, resource_path
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Platform‑specific printer import
@@ -55,13 +55,11 @@ S = QSettings(*SETTINGS_SCOPE)
 # Printing util (thread‑safe)
 # -----------------------------------------------------------------------------
 
-import logging, queue
 
-def wait_ms(ms: int):
+def wait_ms(ms: int) -> None:
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec()    # blocks here, but UI remains responsive
-
+    loop.exec()  # blocks here, but UI remains responsive
 
 
 def _print_zpl(
@@ -92,9 +90,6 @@ def _print_zpl(
     except Exception as exc:  # pylint: disable=broad-except
 
         return cb(False, f"Print error: {exc}")
-
-
-
 
 
 # -----------------------------------------------------------------------------
@@ -129,6 +124,7 @@ class OptionsDialog(QDialog):
         lay.addWidget(self.server_edit)
         lay.addWidget(save_btn)
         self.setFixedWidth(500)
+
     # ------------------------------------------------------------------
     def _save(self) -> None:
         """Persist the entered values back to :class:`QSettings`."""
@@ -146,10 +142,13 @@ class OptionsDialog(QDialog):
         S.setValue("server_url", svr)  # <── consistent key
         self.accept()
 
+
 class TestPrintDialog(QDialog):
     """Light-weight dialog to paste ZPL and send a one-off test print."""
 
-    def __init__(self, parent: QDialog | None = None, printer_name: str | None = None) -> None:
+    def __init__(
+        self, parent: QDialog | None = None, printer_name: str | None = None
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Test ZPL Print")
         self.printer_name = printer_name
@@ -177,15 +176,18 @@ class TestPrintDialog(QDialog):
             return
 
         def cb(ok: bool, msg: str) -> None:
-            def show_result() -> None:             # runs later in GUI thread
+            def show_result() -> None:  # runs later in GUI thread
                 self.status_lbl.setText(msg)
                 parent = self if ok else self.parent()
                 QMessageBox.information(parent, "Test ZPL Print", msg)
 
-            QTimer.singleShot(0, show_result)      # hop to GUI thread
+            QTimer.singleShot(0, show_result)  # hop to GUI thread
 
         # run the actual I/O in a worker thread
-        Thread(target=_print_zpl, args=(self.printer_name, zpl, cb), daemon=True).start()
+        Thread(
+            target=_print_zpl, args=(self.printer_name, zpl, cb), daemon=True
+        ).start()
+
 
 # -----------------------------------------------------------------------------
 # Main Qt window
@@ -195,7 +197,7 @@ class MainWindow(QMainWindow):
     status_sig = Signal(str)
     ack_sig = Signal(int)  # job_id to ack
     _reconnect = Signal()
-    gui_connected   = Signal()
+    gui_connected = Signal()
     gui_disconnected = Signal()
     add_print_sig = Signal(str, int, str)  # invoice, copies, timestamp
 
@@ -220,10 +222,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.splitter)
 
         # initial sizes once layout is settled
-        QTimer.singleShot(0, lambda: self.splitter.setSizes([
-            int(self.splitter.width() * 0.25),
-            int(self.splitter.width() * 0.75),
-        ]))
+        QTimer.singleShot(
+            0,
+            lambda: self.splitter.setSizes(
+                [
+                    int(self.splitter.width() * 0.25),
+                    int(self.splitter.width() * 0.75),
+                ]
+            ),
+        )
 
         self.reprint_btn = QToolButton(self)
         self.reprint_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
@@ -233,7 +240,6 @@ class MainWindow(QMainWindow):
         self.reprint_label = QLabel("")
         self.reprint_label.setStyleSheet("font-weight:bold; margin:5px;")
 
-
         self.stat = QLabel("Disconnected")
         self.stat.setStyleSheet("font-weight:bold; margin:5px;")
 
@@ -242,7 +248,7 @@ class MainWindow(QMainWindow):
         self.re_btn.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
         self.re_btn.setToolTip("Reconnect to server now")
         self.re_btn.clicked.connect(self._manual_reconnect)
-        self.re_btn.setEnabled(True)        # enabled while we are disconnected
+        self.re_btn.setEnabled(True)  # enabled while we are disconnected
 
         # left-aligned: reprint button
         self.statusBar().addWidget(self.reprint_btn)
@@ -257,11 +263,10 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.stat)
         self.statusBar().addPermanentWidget(self.re_btn)
 
+        self._seen_jobs: set[int] = set()  # de-dupe tracker
+        self._init_db()  # create DB + load history
 
-        self._seen_jobs: set[int] = set()   # de-dupe tracker
-        self._init_db()                     # create DB + load history
-
-        self._load_history()     # ← add this line
+        self._load_history()  # ← add this line
 
         self._build_menu()
         self._build_tray()
@@ -272,8 +277,8 @@ class MainWindow(QMainWindow):
         # -- socket ------------------------------------------------------------
         self.sio = socketio.Client(  # auto reconnect off (we handle it)
             reconnection=False,
-            logger=True,            # <── add
-            engineio_logger=True,   # <── add
+            logger=True,  # <── add
+            engineio_logger=True,  # <── add
         )
         self._register_handlers()
         QTimer.singleShot(0, self._connect_socket)
@@ -290,13 +295,20 @@ class MainWindow(QMainWindow):
         from threading import Lock
 
         self._job_lock = Lock()
-        self._inflight: set[int] = set()  # jobs currently being printed
-        self._recent_fingerprints: dict[str, float] = {}  # fingerprint -> last seen timestamp (for job_id-less jobs)
-        self._fingerprint_ttl = 60  # seconds window to suppress duplicates for unlabeled jobs
+        self._inflight: dict[int, float] = (
+            {}
+        )  # job_id -> timestamp when printing started
+        self._inflight_ttl = 30  # seconds before an in-flight job is retried
+        self._recent_fingerprints: dict[str, float] = (
+            {}
+        )  # fingerprint -> last seen timestamp (for job_id-less jobs)
+        self._fingerprint_ttl = (
+            60  # seconds window to suppress duplicates for unlabeled jobs
+        )
 
     def _load_history(self) -> None:
         """Populate the left-hand list from the existing DB rows."""
-        self.list.clear()                         # start with a clean slate
+        self.list.clear()  # start with a clean slate
         with sqlite3.connect(self._db_path) as con:
             for invoice, pcs, ts in con.execute(
                 "SELECT invoice, pcs, tstamp FROM prints ORDER BY id DESC"
@@ -314,7 +326,13 @@ class MainWindow(QMainWindow):
         invoice = invoice_line.split("  x")[0].strip()
 
         with sqlite3.connect(self._db_path) as con:
-            row = con.execute("SELECT zpl, copies FROM prints WHERE invoice=? ORDER BY id DESC LIMIT 1", (invoice,)).fetchone()
+            row = con.execute(
+                (
+                    "SELECT zpl, copies FROM prints "
+                    "WHERE invoice=? ORDER BY id DESC LIMIT 1"
+                ),
+                (invoice,),
+            ).fetchone()
 
         if not row:
             QMessageBox.warning(self, "Re-print", "ZPL not found for that invoice")
@@ -322,7 +340,11 @@ class MainWindow(QMainWindow):
 
         zpl, copies = row
         self.log_sig.emit(f"Re-printing {invoice} x{copies or 1}…")
-        Thread(target=_print_zpl, args=(self.printer_name, zpl, lambda *_: None), daemon=True).start()
+        Thread(
+            target=_print_zpl,
+            args=(self.printer_name, zpl, lambda *_: None),
+            daemon=True,
+        ).start()
 
     def _init_db(self) -> None:
         """Create the SQLite DB (if missing) and load printed job-ids."""
@@ -343,7 +365,10 @@ class MainWindow(QMainWindow):
             )
             # pre-load IDs so we don’t re-print across restarts
             self._seen_jobs.update(
-                row[0] for row in con.execute("SELECT DISTINCT job_id FROM prints WHERE job_id IS NOT NULL")
+                row[0]
+                for row in con.execute(
+                    "SELECT DISTINCT job_id FROM prints WHERE job_id IS NOT NULL"
+                )
             )
 
     # ------------------------------------------------------------------
@@ -398,9 +423,9 @@ class MainWindow(QMainWindow):
     # ================================================================== PREFS
     def _load_prefs(self) -> None:
         """Load persisted preferences."""
-        self.api_key      = S.value("api_key", "").strip()
+        self.api_key = S.value("api_key", "").strip()
         self.printer_name = S.value("printer_name", DEFAULT_PRINTER)
-        self.server_url   = S.value("server_url", SERVER_URL).strip()
+        self.server_url = S.value("server_url", SERVER_URL).strip()
 
         if not self.api_key:
             self.status_sig.emit("No API key")
@@ -412,7 +437,9 @@ class MainWindow(QMainWindow):
         @self.sio.event
         def connect():
             print("SocketIO: connected, emitting api_key explicitly")
-            self.sio.emit('auth', {'api_key': self.api_key})  # ensure your server expects this event
+            self.sio.emit(
+                "auth", {"api_key": self.api_key}
+            )  # ensure your server expects this event
             self.log_sig.emit("Connected")
             self.gui_connected.emit()
 
@@ -468,24 +495,27 @@ class MainWindow(QMainWindow):
         pcs = data.get("pcs")
         zpl = data.get("data")
 
+        now = dt.datetime.now().timestamp()
+
         # Dedupe / reserve before doing any work
         with self._job_lock:
+            expire_stale_jobs(self._inflight, self._inflight_ttl, now)
             if job_id:
                 if job_id in self._seen_jobs or job_id in self._inflight:
-                    self.log_sig.emit(f"Job {job_id} ignored (already printed or in-flight)")
+                    self.log_sig.emit(
+                        f"Job {job_id} ignored (already printed or in-flight)"
+                    )
                     return
-                self._inflight.add(job_id)
+                self._inflight[job_id] = now
             else:
                 # fingerprint-based suppression for jobs without ID
                 fp = self._make_fingerprint(inv, pcs, zpl)
-                now = dt.datetime.now().timestamp()
-                # cleanup stale fingerprints
-                for key, ts in list(self._recent_fingerprints.items()):
-                    if now - ts > self._fingerprint_ttl:
-                        del self._recent_fingerprints[key]
+                expire_stale_jobs(self._recent_fingerprints, self._fingerprint_ttl, now)
                 last = self._recent_fingerprints.get(fp)
-                if last and now - last < self._fingerprint_ttl:
-                    self.log_sig.emit(f"Ignoring duplicate unlabeled job for invoice {inv}")
+                if last:
+                    self.log_sig.emit(
+                        f"Ignoring duplicate unlabeled job for invoice {inv}"
+                    )
                     return
                 self._recent_fingerprints[fp] = now
 
@@ -494,7 +524,7 @@ class MainWindow(QMainWindow):
             if ok:
                 with self._job_lock:
                     if job_id:
-                        self._inflight.discard(job_id)
+                        self._inflight.pop(job_id, None)
                         self._seen_jobs.add(job_id)
                 # persist to DB + update GUI list
                 self._store_print(job_id, inv, pcs, zpl)
@@ -504,7 +534,7 @@ class MainWindow(QMainWindow):
                 # on failure, release reservation so it can be retried
                 with self._job_lock:
                     if job_id:
-                        self._inflight.discard(job_id)
+                        self._inflight.pop(job_id, None)
 
         _print_zpl(self.printer_name, zpl, cb)
 
@@ -518,7 +548,10 @@ class MainWindow(QMainWindow):
         tstamp = dt.datetime.now().isoformat(timespec="seconds")
         with sqlite3.connect(self._db_path) as con:
             con.execute(
-                "INSERT INTO prints (job_id, invoice, pcs, zpl, tstamp) VALUES (?,?,?,?,?)",
+                (
+                    "INSERT INTO prints (job_id, invoice, pcs, zpl, tstamp) "
+                    "VALUES (?,?,?,?,?)"
+                ),
                 (job_id, invoice, pcs, zpl, tstamp),
             )
         # safely update GUI from any thread:
