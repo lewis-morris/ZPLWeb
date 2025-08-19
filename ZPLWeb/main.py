@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ZPLWeb.utils import resource_path
+from ZPLWeb.utils import ensure_single_instance, resource_path
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Platform‑specific printer import
@@ -639,6 +639,8 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if not ensure_single_instance("Coleman Print Agent"):
+        return
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
