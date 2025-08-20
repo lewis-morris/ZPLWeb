@@ -51,11 +51,13 @@ def ensure_single_instance(window_title: str) -> bool:
         import win32con
         import win32event
         import win32gui
+        import winerror
     except Exception:  # pragma: no cover - pywin32 absent on non-Windows
         return True
 
     win32event.CreateMutex(None, False, "ZPLWebSingleton")
-    if win32api.GetLastError() == win32con.ERROR_ALREADY_EXISTS:
+    # winerror exposes error codes; ERROR_ALREADY_EXISTS signals an existing mutex
+    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
         hwnd = win32gui.FindWindow(None, window_title)
         if hwnd:
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
