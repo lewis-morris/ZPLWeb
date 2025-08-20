@@ -29,6 +29,9 @@ def test_existing_instance_brought_to_front(monkeypatch):
     monkeypatch.setitem(sys.modules, "winerror", fake_modules["winerror"])
 
     assert utils.ensure_single_instance("T") is False
+    fake_modules["win32event"].CreateMutex.assert_called_with(
+        None, False, "Global\\ZPLWebSingleton"
+    )
     fake_modules["win32gui"].FindWindow.assert_called_with(None, "T")
     fake_modules["win32gui"].ShowWindow.assert_called_with(42, 9)
     fake_modules["win32gui"].SetForegroundWindow.assert_called_with(42)
@@ -54,7 +57,11 @@ def test_primary_instance(monkeypatch):
     monkeypatch.setitem(sys.modules, "winerror", fake_modules["winerror"])
 
     assert utils.ensure_single_instance("T") is True
+    fake_modules["win32event"].CreateMutex.assert_called_with(
+        None, False, "Global\\ZPLWebSingleton"
+    )
     fake_modules["win32gui"].FindWindow.assert_not_called()
+    assert utils._SINGLETON_MUTEX == fake_modules["win32event"].CreateMutex.return_value
 
 
 def test_file_lock_fallback(monkeypatch, tmp_path):
