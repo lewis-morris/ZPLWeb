@@ -55,6 +55,7 @@ def _lock_file_path() -> Path:
 
 
 _LOCK_FILE = _lock_file_path()
+_SINGLETON_MUTEX = None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -91,7 +92,10 @@ def ensure_single_instance(window_title: str) -> bool:
             import win32gui
             import winerror
 
-            win32event.CreateMutex(None, False, "ZPLWebSingleton")
+            global _SINGLETON_MUTEX
+            _SINGLETON_MUTEX = win32event.CreateMutex(
+                None, False, "Global\\ZPLWebSingleton"
+            )
             if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
                 hwnd = win32gui.FindWindow(None, window_title)
                 if hwnd:
