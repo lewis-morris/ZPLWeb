@@ -10,7 +10,7 @@ from typing import Any, Callable
 import socketio
 from appdirs import user_data_dir
 from PySide6.QtCore import QEventLoop, QSettings, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -18,13 +18,11 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
     QSplitter,
     QStyle,
-    QSystemTrayIcon,
     QTextEdit,
     QToolButton,
     QVBoxLayout,
@@ -269,7 +267,6 @@ class MainWindow(QMainWindow):
         self._load_history()  # ← add this line
 
         self._build_menu()
-        self._build_tray()
 
         # -- data --------------------------------------------------------------
         self._load_prefs()
@@ -428,6 +425,16 @@ class MainWindow(QMainWindow):
         """User‑initiated reconnect via the reload button."""
         self._connect_socket()
 
+    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        """Disconnect the socket client before the window closes.
+
+        Args:
+            event: The Qt close event being processed.
+        """
+        if self.sio.connected:
+            self.sio.disconnect()
+        super().closeEvent(event)
+
     # ===================================================================== MENU
     def _build_menu(self) -> None:
         mb = self.menuBar()
@@ -441,21 +448,6 @@ class MainWindow(QMainWindow):
         # NEW —–––––––––––––––––––––––––––––––––––––
         tools_m = mb.addMenu("Tools")
         tools_m.addAction("Test ZPL Print", self._open_test_print)
-
-    # ==================================================================== TRAY
-    def _build_tray(self) -> None:
-        """Create a system tray icon if supported."""
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            return
-        tray = QSystemTrayIcon(self)
-        tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-        menu = QMenu()
-        menu.addAction("Show", self.showNormal)
-        menu.addAction("Exit", self.close)
-        tray.setContextMenu(menu)
-        tray.activated.connect(lambda *_: self.showNormal())
-        tray.show()
-        self.tray = tray
 
     # ================================================================== PREFS
     def _load_prefs(self) -> None:
@@ -639,10 +631,16 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    """Run the print agent GUI application."""
     if not ensure_single_instance("Coleman Print Agent"):
+        app = QApplication(sys.argv)
+        QMessageBox.warning(
+            None, "Coleman Print Agent", "Application is already running."
+        )
+        sys.exit(0)
         return
+
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
 
     icon_file = resource_path("assets/icon.ico")
     icon = QIcon(icon_file)
