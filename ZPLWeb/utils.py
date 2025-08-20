@@ -33,7 +33,28 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 
 
-_LOCK_FILE = Path(tempfile.gettempdir()) / "ZPLWeb.lock"
+def _lock_file_path() -> Path:
+    """Return a stable path for the single-instance lock file.
+
+    PyInstaller one-file builds extract to a unique temporary directory for each
+    run. When that directory is used for the lock file, each process sees a
+    different path and multiple instances can start. To avoid this, the lock
+    file is placed in the parent of the extraction directory when running in a
+    frozen application.
+
+    Returns:
+        Path: Location of the lock file shared across all instances.
+    """
+
+    tmp_dir = Path(tempfile.gettempdir())
+    if getattr(sys, "frozen", False) and tmp_dir.name.startswith("_MEI"):
+        # PyInstaller one-file: use system temp directory rather than the
+        # per-run extraction folder to ensure a common lock file.
+        tmp_dir = tmp_dir.parent
+    return tmp_dir / "ZPLWeb.lock"
+
+
+_LOCK_FILE = _lock_file_path()
 
 
 def _pid_alive(pid: int) -> bool:

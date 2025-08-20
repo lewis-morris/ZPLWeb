@@ -1,6 +1,8 @@
 """Tests for single-instance behavior."""
 
+import importlib
 import sys
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -65,3 +67,18 @@ def test_file_lock_fallback(monkeypatch, tmp_path):
     assert utils.ensure_single_instance("T") is True
     assert utils.ensure_single_instance("T") is False
     lock_file.unlink(missing_ok=True)
+
+
+def test_lock_file_path_in_frozen_app(monkeypatch, tmp_path):
+    """PyInstaller one-file builds should share a common lock file."""
+
+    mei_dir = tmp_path / "_MEI123"
+    mei_dir.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(mei_dir))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    importlib.reload(utils)
+    try:
+        assert utils._LOCK_FILE == tmp_path / "ZPLWeb.lock"
+    finally:
+        importlib.reload(utils)

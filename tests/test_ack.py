@@ -24,6 +24,9 @@ def test_emit_ack_updates_db(app, tmp_path, monkeypatch):
         def emit(self, event, data):
             self.last = (event, data)
 
+        def disconnect(self) -> None:  # pragma: no cover - called on close
+            self.connected = False
+
     win.sio = DummySio()
     win._emit_ack(job_id)
     assert win._is_job_acked(job_id)
