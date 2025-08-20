@@ -39,7 +39,7 @@ from ZPLWeb.utils import ensure_single_instance, resource_path
 if sys.platform.startswith("win"):
     import win32print
 else:
-    win32print = None  # noqa:  allow the file to import on non‑Windows hosts
+    win32print = None  # allow the file to import on non‑Windows hosts
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants & defaults

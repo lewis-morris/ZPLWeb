@@ -1,10 +1,10 @@
-"""Tests for Windows single-instance behavior."""
+"""Tests for single-instance behavior."""
 
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from ZPLWeb.utils import ensure_single_instance
+import ZPLWeb.utils as utils
 
 
 def test_existing_instance_brought_to_front(monkeypatch):
@@ -26,7 +26,7 @@ def test_existing_instance_brought_to_front(monkeypatch):
     monkeypatch.setitem(sys.modules, "win32gui", fake_modules["win32gui"])
     monkeypatch.setitem(sys.modules, "winerror", fake_modules["winerror"])
 
-    assert ensure_single_instance("T") is False
+    assert utils.ensure_single_instance("T") is False
     fake_modules["win32gui"].FindWindow.assert_called_with(None, "T")
     fake_modules["win32gui"].ShowWindow.assert_called_with(42, 9)
     fake_modules["win32gui"].SetForegroundWindow.assert_called_with(42)
@@ -51,5 +51,17 @@ def test_primary_instance(monkeypatch):
     monkeypatch.setitem(sys.modules, "win32gui", fake_modules["win32gui"])
     monkeypatch.setitem(sys.modules, "winerror", fake_modules["winerror"])
 
-    assert ensure_single_instance("T") is True
+    assert utils.ensure_single_instance("T") is True
     fake_modules["win32gui"].FindWindow.assert_not_called()
+
+
+def test_file_lock_fallback(monkeypatch, tmp_path):
+    """Fallback to a file lock when pywin32 is unavailable."""
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    lock_file = tmp_path / "lock"
+    monkeypatch.setattr(utils, "_LOCK_FILE", lock_file)
+
+    assert utils.ensure_single_instance("T") is True
+    assert utils.ensure_single_instance("T") is False
+    lock_file.unlink(missing_ok=True)
