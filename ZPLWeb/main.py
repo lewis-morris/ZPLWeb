@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ZPLWeb.utils import ensure_single_instance, resource_path
+from ZPLWeb.utils import ensure_single_instance, resource_path, _make_fingerprint
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Platform‑specific printer import
@@ -257,8 +257,14 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.statusBar().addWidget(spacer)
 
-        # right-aligned: status label and reconnect
+        # right-aligned: status label and actions
         self.statusBar().addPermanentWidget(self.stat)
+        # request outstanding labels button
+        self.missing_btn = QToolButton(self)
+        self.missing_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogResetButton))
+        self.missing_btn.setToolTip("Request outstanding labels from server")
+        self.missing_btn.clicked.connect(self._request_missing)
+        self.statusBar().addPermanentWidget(self.missing_btn)
         self.statusBar().addPermanentWidget(self.re_btn)
 
         self._seen_jobs: set[int] = set()  # de-dupe tracker
@@ -296,9 +302,16 @@ class MainWindow(QMainWindow):
         self._recent_fingerprints: dict[str, float] = (
             {}
         )  # fingerprint -> last seen timestamp (for job_id-less jobs)
-        self._fingerprint_ttl = (
-            60  # seconds window to suppress duplicates for unlabeled jobs
-        )
+        self._fingerprint_ttl = 60  # seconds window to suppress duplicates for unlabeled jobs
+
+        # automatic reconnect support
+        self._connecting = False
+        self._reconnect_timer = QTimer(self)
+        self._reconnect_timer.setInterval(5000)  # 5s retry
+        self._reconnect_timer.timeout.connect(self._reconnect_tick)
+
+        # allow options-triggered reconnect
+        self._reconnect.connect(self._connect_socket)
 
     def _load_history(self) -> None:
         """Populate the left-hand list from the existing DB rows."""
@@ -414,16 +427,45 @@ class MainWindow(QMainWindow):
     def _on_gui_connected(self):
         self.re_btn.setEnabled(False)
         self.status_sig.emit("Connected")
+        if self._reconnect_timer.isActive():
+            self._reconnect_timer.stop()
 
     @Slot()
     def _on_gui_disconnected(self):
         self.re_btn.setEnabled(True)
         self.status_sig.emit("Disconnected")
+        if not self._reconnect_timer.isActive():
+            self._reconnect_timer.start()
 
     # ─── still inside MainWindow class (anywhere convenient) ─────────────────────
     def _manual_reconnect(self) -> None:
         """User‑initiated reconnect via the reload button."""
         self._connect_socket()
+
+    def _request_missing(self) -> None:
+        """Ask the server to re-emit any unacknowledged print jobs for this API key."""
+        if not self.sio.connected:
+            self.log_sig.emit("Not connected; will retry after reconnect.")
+            return
+        if not self.api_key:
+            QMessageBox.information(self, "Print Missing", "No API key configured.")
+            return
+
+        # light cooldown to avoid spamming server when pressing repeatedly
+        if hasattr(self, "missing_btn"):
+            self.missing_btn.setEnabled(False)
+            QTimer.singleShot(2000, lambda: self.missing_btn.setEnabled(True))
+
+        self.log_sig.emit("Requesting outstanding labels…")
+        try:
+            self.sio.emit("request_missing_prints", {"api_key": self.api_key})
+        except Exception as exc:  # safety net; keep UI responsive
+            self.log_sig.emit(f"Request failed: {exc}")
+
+    def _reconnect_tick(self) -> None:
+        if not self.sio.connected and not self._connecting and self.api_key and self.server_url:
+            self.log_sig.emit("Reconnecting…")
+            self._connect_socket()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
         """Disconnect the socket client before the window closes.
@@ -448,6 +490,7 @@ class MainWindow(QMainWindow):
         # NEW —–––––––––––––––––––––––––––––––––––––
         tools_m = mb.addMenu("Tools")
         tools_m.addAction("Test ZPL Print", self._open_test_print)
+        tools_m.addAction("Print Missing", self._request_missing)
 
     # ================================================================== PREFS
     def _load_prefs(self) -> None:
@@ -465,19 +508,21 @@ class MainWindow(QMainWindow):
 
         @self.sio.event
         def connect():
-            print("SocketIO: connected, emitting api_key explicitly")
-            self.sio.emit(
-                "auth", {"api_key": self.api_key}
-            )  # ensure your server expects this event
+            print("SocketIO: connected")
             self.log_sig.emit("Connected")
             self.gui_connected.emit()
             self._flush_pending_acks()
+            self._connecting = False
+            # automatically request any outstanding labels on connect
+            QTimer.singleShot(0, self._request_missing)
 
         @self.sio.event
         def disconnect():
             print("SocketIO: disconnect event fired")
             self.log_sig.emit("Disconnected")
             self.gui_disconnected.emit()
+            if not self._reconnect_timer.isActive():
+                self._reconnect_timer.start()
 
         @self.sio.event
         def connect_error(err):
@@ -486,6 +531,8 @@ class MainWindow(QMainWindow):
             if not self.sio.connected:
                 self.status_sig.emit("Disconnected")
                 self.re_btn.setEnabled(True)
+                if not self._reconnect_timer.isActive():
+                    self._reconnect_timer.start()
 
         @self.sio.on("status")
         def on_status(data):
@@ -508,15 +555,19 @@ class MainWindow(QMainWindow):
             self.sio.disconnect()
 
         try:
+            if self._connecting:
+                return
+            self._connecting = True
             self.sio.connect(
                 self.server_url,
-                transports=["websocket"],
+                transports=["websocket", "polling"],
                 auth={"api_key": self.api_key},
             )
             print("Attempting socket.io connection...")
         except Exception as exc:
             self.log_sig.emit(f"Connection error: {exc}")
             self.status_sig.emit("Disconnected")
+            self._connecting = False
 
     # .........................................................................
     def _handle_print_job(self, data: dict) -> None:
@@ -543,7 +594,7 @@ class MainWindow(QMainWindow):
                 self._inflight.add(job_id)
             else:
                 # fingerprint-based suppression for jobs without ID
-                fp = self._make_fingerprint(inv, pcs, zpl)
+                fp = _make_fingerprint(inv, pcs, zpl)
                 now = dt.datetime.now().timestamp()
                 # cleanup stale fingerprints
                 for key, ts in list(self._recent_fingerprints.items()):
@@ -587,9 +638,7 @@ class MainWindow(QMainWindow):
             return
         if self.sio.connected:
             try:
-                self.sio.emit(
-                    "print_label_ack", {"job_id": job_id, "status": "printed"}
-                )
+                self.sio.emit("print_label_ack", {"job_id": job_id})
                 with sqlite3.connect(self._db_path) as con:
                     con.execute("UPDATE prints SET acked=1 WHERE job_id=?", (job_id,))
             except Exception as exc:  # pylint: disable=broad-except
