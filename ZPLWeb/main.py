@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
         with sqlite3.connect(self._db_path) as con:
             row = con.execute(
                 (
-                    "SELECT zpl, copies FROM prints "
+                    "SELECT zpl, pcs FROM prints "
                     "WHERE invoice=? ORDER BY id DESC LIMIT 1"
                 ),
                 (invoice,),
