@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ZPLWeb.utils import ensure_single_instance, resource_path, _make_fingerprint
+from ZPLWeb.utils import _make_fingerprint, ensure_single_instance, resource_path
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Platform‑specific printer import
@@ -302,7 +302,9 @@ class MainWindow(QMainWindow):
         self._recent_fingerprints: dict[str, float] = (
             {}
         )  # fingerprint -> last seen timestamp (for job_id-less jobs)
-        self._fingerprint_ttl = 60  # seconds window to suppress duplicates for unlabeled jobs
+        self._fingerprint_ttl = (
+            60  # seconds window to suppress duplicates for unlabeled jobs
+        )
 
         # automatic reconnect support
         self._connecting = False
@@ -317,10 +319,13 @@ class MainWindow(QMainWindow):
         """Populate the left-hand list from the existing DB rows."""
         self.list.clear()  # start with a clean slate
         with sqlite3.connect(self._db_path) as con:
-            for invoice, pcs, ts in con.execute(
-                "SELECT invoice, pcs, tstamp FROM prints ORDER BY id DESC"
-            ):
-                self._add_print_to_list(invoice, pcs, ts)
+            labels = [
+                f"{invoice}  x{pcs or 1}"
+                for invoice, pcs in con.execute(
+                    "SELECT invoice, pcs FROM prints ORDER BY id ASC"
+                )
+            ]
+        self.list.addItems(labels)
 
     def _add_print_to_list(self, invoice: str, pcs: int, ts: str) -> None:
         self.list.insertItem(0, f"{invoice}  x{pcs or 1}")
@@ -366,8 +371,7 @@ class MainWindow(QMainWindow):
         self._db_path = data_dir / "prints.sqlite"
 
         with sqlite3.connect(self._db_path) as con:
-            con.execute(
-                """CREATE TABLE IF NOT EXISTS prints (
+            con.execute("""CREATE TABLE IF NOT EXISTS prints (
                        id       INTEGER PRIMARY KEY AUTOINCREMENT,
                        job_id   INTEGER,
                        invoice  TEXT,
@@ -375,12 +379,36 @@ class MainWindow(QMainWindow):
                        zpl      TEXT,
                        tstamp   TEXT,
                        acked    INTEGER DEFAULT 0
-                   )"""
-            )
+                   )""")
             try:
                 con.execute("ALTER TABLE prints ADD COLUMN acked INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+
+            con.execute(
+                (
+                    "CREATE INDEX IF NOT EXISTS idx_prints_invoice_id_desc "
+                    "ON prints(invoice, id DESC)"
+                )
+            )
+            con.execute(
+                (
+                    "CREATE INDEX IF NOT EXISTS idx_prints_job_id_id_desc "
+                    "ON prints(job_id, id DESC) WHERE job_id IS NOT NULL"
+                )
+            )
+            con.execute(
+                (
+                    "CREATE INDEX IF NOT EXISTS idx_prints_pending_acks "
+                    "ON prints(acked, job_id) WHERE job_id IS NOT NULL AND acked=0"
+                )
+            )
+            con.execute(
+                (
+                    "CREATE INDEX IF NOT EXISTS idx_prints_history_id_desc "
+                    "ON prints(id DESC, invoice, pcs, tstamp)"
+                )
+            )
 
             # pre-load IDs so we don’t re-print across restarts
             self._seen_jobs.update(
@@ -409,14 +437,10 @@ class MainWindow(QMainWindow):
     def _flush_pending_acks(self) -> None:
         """Retry any previously unacknowledged print jobs."""
         with sqlite3.connect(self._db_path) as con:
-            jobs = [
-                r[0]
-                for r in con.execute(
-                    "SELECT job_id FROM prints WHERE job_id IS NOT NULL AND acked=0"
-                )
-            ]
-        for jid in jobs:
-            self.ack_sig.emit(jid)
+            for (jid,) in con.execute(
+                "SELECT job_id FROM prints WHERE job_id IS NOT NULL AND acked=0"
+            ):
+                self.ack_sig.emit(jid)
 
     # ------------------------------------------------------------------
     def _open_test_print(self) -> None:
@@ -463,7 +487,12 @@ class MainWindow(QMainWindow):
             self.log_sig.emit(f"Request failed: {exc}")
 
     def _reconnect_tick(self) -> None:
-        if not self.sio.connected and not self._connecting and self.api_key and self.server_url:
+        if (
+            not self.sio.connected
+            and not self._connecting
+            and self.api_key
+            and self.server_url
+        ):
             self.log_sig.emit("Reconnecting…")
             self._connect_socket()
 
@@ -638,7 +667,9 @@ class MainWindow(QMainWindow):
             return
         if self.sio.connected:
             try:
-                self.sio.emit("print_label_ack", {"job_id": job_id})
+                self.sio.emit(
+                    "print_label_ack", {"job_id": job_id, "status": "printed"}
+                )
                 with sqlite3.connect(self._db_path) as con:
                     con.execute("UPDATE prints SET acked=1 WHERE job_id=?", (job_id,))
             except Exception as exc:  # pylint: disable=broad-except

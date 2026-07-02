@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 pytest.importorskip("PySide6.QtWidgets")
-import ZPLWeb.main as main_module
+import ZPLWeb.main as main_module  # noqa: E402
 
 
 def test_second_instance_warns_and_exits(monkeypatch):
