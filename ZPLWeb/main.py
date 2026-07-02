@@ -3,6 +3,7 @@
 import datetime as dt
 import sqlite3
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
 from typing import Any, Callable
@@ -48,6 +49,28 @@ SETTINGS_SCOPE = ("ColemanAgent", "PrintAgent")
 
 # Helper to load / save settings
 S = QSettings(*SETTINGS_SCOPE)
+
+
+@dataclass(frozen=True)
+class PrintJob:
+    job_id: int | None
+    invoice: str
+    pcs: int
+    zpl: str
+
+
+def _history_label(invoice: str, pcs: int | None) -> str:
+    return f"{invoice}  x{pcs or 1}"
+
+
+def _job_from_payload(data: dict) -> PrintJob:
+    return PrintJob(
+        job_id=data.get("job_id"),
+        invoice=data.get("invoice"),
+        pcs=data.get("pcs"),
+        zpl=data.get("data"),
+    )
+
 
 # -----------------------------------------------------------------------------
 # Printing util (thread‑safe)
@@ -320,7 +343,7 @@ class MainWindow(QMainWindow):
         self.list.clear()  # start with a clean slate
         with sqlite3.connect(self._db_path) as con:
             labels = [
-                f"{invoice}  x{pcs or 1}"
+                _history_label(invoice, pcs)
                 for invoice, pcs in con.execute(
                     "SELECT invoice, pcs FROM prints ORDER BY id ASC"
                 )
@@ -328,7 +351,7 @@ class MainWindow(QMainWindow):
         self.list.addItems(labels)
 
     def _add_print_to_list(self, invoice: str, pcs: int, ts: str) -> None:
-        self.list.insertItem(0, f"{invoice}  x{pcs or 1}")
+        self.list.insertItem(0, _history_label(invoice, pcs))
 
     def _reprint_selected(self) -> None:
         row = self.list.currentRow()
@@ -598,63 +621,72 @@ class MainWindow(QMainWindow):
             self.status_sig.emit("Disconnected")
             self._connecting = False
 
+    def _reserve_print_job(self, job: PrintJob) -> bool:
+        """Reserve a job for printing when it is not already handled."""
+        if job.job_id:
+            if job.job_id in self._inflight:
+                self.log_sig.emit(f"Job {job.job_id} ignored (already in-flight)")
+                return False
+            if job.job_id in self._seen_jobs:
+                if not self._is_job_acked(job.job_id):
+                    self.log_sig.emit(
+                        f"Job {job.job_id} ignored (already printed, ack pending)"
+                    )
+                    self.ack_sig.emit(job.job_id)
+                else:
+                    self.log_sig.emit(f"Job {job.job_id} ignored (already printed)")
+                return False
+            self._inflight.add(job.job_id)
+            return True
+
+        fp = _make_fingerprint(job.invoice, job.pcs, job.zpl)
+        now = dt.datetime.now().timestamp()
+        self._forget_stale_fingerprints(now)
+        last = self._recent_fingerprints.get(fp)
+        if last and now - last < self._fingerprint_ttl:
+            self.log_sig.emit(
+                f"Ignoring duplicate unlabeled job for invoice {job.invoice}"
+            )
+            return False
+        self._recent_fingerprints[fp] = now
+        return True
+
+    def _forget_stale_fingerprints(self, now: float) -> None:
+        for key, ts in list(self._recent_fingerprints.items()):
+            if now - ts > self._fingerprint_ttl:
+                del self._recent_fingerprints[key]
+
     # .........................................................................
     def _handle_print_job(self, data: dict) -> None:
-        job_id = data.get("job_id")
-        inv = data.get("invoice")
-        pcs = data.get("pcs")
-        zpl = data.get("data")
+        job = _job_from_payload(data)
 
         # Dedupe / reserve before doing any work
         with self._job_lock:
-            if job_id:
-                if job_id in self._inflight:
-                    self.log_sig.emit(f"Job {job_id} ignored (already in-flight)")
-                    return
-                if job_id in self._seen_jobs:
-                    if not self._is_job_acked(job_id):
-                        self.log_sig.emit(
-                            f"Job {job_id} ignored (already printed, ack pending)"
-                        )
-                        self.ack_sig.emit(job_id)
-                    else:
-                        self.log_sig.emit(f"Job {job_id} ignored (already printed)")
-                    return
-                self._inflight.add(job_id)
-            else:
-                # fingerprint-based suppression for jobs without ID
-                fp = _make_fingerprint(inv, pcs, zpl)
-                now = dt.datetime.now().timestamp()
-                # cleanup stale fingerprints
-                for key, ts in list(self._recent_fingerprints.items()):
-                    if now - ts > self._fingerprint_ttl:
-                        del self._recent_fingerprints[key]
-                last = self._recent_fingerprints.get(fp)
-                if last and now - last < self._fingerprint_ttl:
-                    self.log_sig.emit(
-                        f"Ignoring duplicate unlabeled job for invoice {inv}"
-                    )
-                    return
-                self._recent_fingerprints[fp] = now
+            if not self._reserve_print_job(job):
+                return
 
         def cb(ok: bool, msg: str) -> None:
-            self.log_sig.emit(msg)
-            if ok:
-                with self._job_lock:
-                    if job_id:
-                        self._inflight.discard(job_id)
-                        self._seen_jobs.add(job_id)
-                # persist to DB + update GUI list
-                self._store_print(job_id, inv, pcs, zpl)
-                if job_id:
-                    self.ack_sig.emit(job_id)
-            else:
-                # on failure, release reservation so it can be retried
-                with self._job_lock:
-                    if job_id:
-                        self._inflight.discard(job_id)
+            self._handle_print_result(job, ok, msg)
 
-        _print_zpl(self.printer_name, zpl, cb)
+        _print_zpl(self.printer_name, job.zpl, cb)
+
+    def _handle_print_result(self, job: PrintJob, ok: bool, msg: str) -> None:
+        self.log_sig.emit(msg)
+        if ok:
+            self._finish_print_job(job, printed=True)
+            self._store_print(job.job_id, job.invoice, job.pcs, job.zpl)
+            if job.job_id:
+                self.ack_sig.emit(job.job_id)
+            return
+
+        self._finish_print_job(job, printed=False)
+
+    def _finish_print_job(self, job: PrintJob, printed: bool) -> None:
+        with self._job_lock:
+            if job.job_id:
+                self._inflight.discard(job.job_id)
+                if printed:
+                    self._seen_jobs.add(job.job_id)
 
     # .........................................................................
     def _emit_ack(self, job_id: int) -> None:
@@ -667,15 +699,19 @@ class MainWindow(QMainWindow):
             return
         if self.sio.connected:
             try:
-                self.sio.emit(
-                    "print_label_ack", {"job_id": job_id, "status": "printed"}
-                )
-                with sqlite3.connect(self._db_path) as con:
-                    con.execute("UPDATE prints SET acked=1 WHERE job_id=?", (job_id,))
+                self.sio.emit("print_label_ack", self._ack_payload(job_id))
+                self._mark_job_acked(job_id)
             except Exception as exc:  # pylint: disable=broad-except
                 self.log_sig.emit(f"Ack error for job {job_id}: {exc}")
         else:
             self.log_sig.emit(f"Ack pending for job {job_id}")
+
+    def _ack_payload(self, job_id: int) -> dict[str, int | str]:
+        return {"job_id": job_id, "status": "printed"}
+
+    def _mark_job_acked(self, job_id: int) -> None:
+        with sqlite3.connect(self._db_path) as con:
+            con.execute("UPDATE prints SET acked=1 WHERE job_id=?", (job_id,))
 
     def _store_print(self, job_id, invoice, pcs, zpl) -> None:
         """Persist a successfully printed job to the local database."""
